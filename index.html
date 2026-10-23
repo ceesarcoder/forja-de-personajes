@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Forja de Personajes</title>
+<meta name="description" content="Califica a cada persona de 1 a 10 en 15 atributos.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Pixelify+Sans:wght@500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Forja de Personajes</h1>
+      <p class="tagline">Califica a cada persona de 1 a 10 en los 15 atributos. No necesitas cuenta. Tu voto se guarda solo y puedes cambiarlo cuando quieras desde este mismo navegador.</p>
+    </div>
+    <div class="status" id="status" data-k="pending" role="status">Conectando…</div>
+  </header>
+
+  <div class="panel sheet-empty" id="boot">Cargando personas…</div>
+  <div class="panel sheet-empty" id="fail" hidden>
+    <p>No se pudo cargar la lista. Revisa tu conexión.</p>
+    <button class="btn" type="button" id="retry">Reintentar</button>
+  </div>
+
+  <div class="app" id="app" hidden>
+    <aside class="panel roster" aria-label="Personas a calificar">
+      <h2>Personas a calificar</h2>
+      <div class="list" id="list"></div>
+      <p class="legend">Si no conoces bien a alguien en un atributo, déjalo sin calificar.</p>
+    </aside>
+    <main class="sheet">
+      <div class="panel sheet-empty" id="vEmpty">Elige a una persona de la lista para calificarla.</div>
+      <div class="sheet" id="vSheet" hidden>
+        <section class="panel hero solo">
+          <div class="hero-main">
+            <h2 class="title-txt" id="vName">Sin nombre</h2>
+            <div class="power">
+              <div class="bar" aria-hidden="true"><i id="vFill"></i></div>
+              <b id="vTxt">0 de 15</b>
+            </div>
+          </div>
+        </section>
+        <div class="groups" id="groups"></div>
+        <div class="foot"><p id="foot">Toca un segmento para calificar de 1 a 10. Toca el valor actual para bajarlo un punto; en 1 lo quita. Tu respuesta es una sola y puedes cambiarla cuando quieras.</p></div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script>
+(function () {
+  var personas = [], mine = {}, selectedId = null;
+  var timers = {}, dirty = {}, chains = {}, persistent = true;
+
+  function newToken() {
+    var a = new Uint8Array(24);
+    (window.crypto || window.msCrypto).getRandomValues(a);
+    return Array.from(a, function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+  }
+  function getVoter() {
+    try {
+      var v = localStorage.getItem("forja-voter");
+      if (!v || v.length < 16) { v = newToken(); localStorage.setItem("forja-voter", v); }
+      return v;
+    } catch (e) { persistent = false; return newToken(); }
+  }
+  var VOTER = getVoter();
+
+  var STATUS = { pending: "Conectando…", ok: "Voto guardado", saving: "Guardando…", error: "Sin conexión, reintentando" };
+  function setStatus(k) { var el = $("#status"); el.dataset.k = k; el.textContent = STATUS[k]; }
+
+  function ratedCount(pid) { return mine[pid] ? Object.keys(mine[pid]).length : 0; }
+
+  function render() {
+    var list = $("#list");
+    list.innerHTML = personas.map(function (p) {
+      var n = ratedCount(p.id);
+      return '<button type="button" class="card" data-id="' + esc(p.id) + '" aria-current="' + (p.id === selectedId) + '">' +
+        '<div class="badge' + (n === 0 ? " dim" : "") + '">' + n + "</div>" +
+        '<div class="meta"><div class="nm">' + esc(p.nombre) + '</div><div class="sub">' + n + " de " + N + " calificados</div></div>" +
+        '<div class="mini one" aria-hidden="true"><i><b style="width:' + (n / N * 100).toFixed(0) + '%"></b></i></div></button>';
+    }).join("") || '<p class="empty">Todavía no hay personas para calificar.</p>';
+
+    var p = personas.filter(function (x) { return x.id === selectedId; })[0];
+    $("#vEmpty").hidden = !!p;
+    $("#vSheet").hidden = !p;
+    if (!p) return;
+    var n = ratedCount(p.id), m = mine[p.id] || {};
+    $("#vName").textContent = p.nombre;
+    $("#vTxt").textContent = n + " de " + N;
+    $("#vFill").style.width = (n / N * 100).toFixed(1) + "%";
+    var g = $("#groups");
+    STATS.forEach(function (s) {
+      var v = m[s.id] || 0;
+      $("#val-" + s.id).textContent = v === 0 ? "–" : v;
+      setPips(g, s.id, v);
+    });
+    $("#foot").textContent = persistent
+      ? "Toca un segmento para calificar de 1 a 10. Toca el valor actual para bajarlo un punto; en 1 lo quita. Tu respuesta es una sola y puedes cambiarla cuando quieras."
+      : "Tu navegador no permite guardar datos locales, así que no podrás cambiar tu voto después de cerrar esta página.";
+  }
+
+  function anyDirty() { return Object.keys(dirty).length > 0; }
+
+  function save(pid) {
+    dirty[pid] = true;
+    setStatus("saving");
+    clearTimeout(timers[pid]);
+    timers[pid] = setTimeout(function () { timers[pid] = null; flush(pid, false); }, 450);
+  }
+  function flush(pid, keep) {
+    chains[pid] = (chains[pid] || Promise.resolve()).then(function () {
+      if (!dirty[pid] || timers[pid]) return;
+      var payload = JSON.parse(JSON.stringify(mine[pid] || {}));
+      return rpc("forja_votar", { p_voter: VOTER, p_persona: pid, p_ratings: payload }, { keepalive: keep }).then(function () {
+        if (JSON.stringify(mine[pid] || {}) === JSON.stringify(payload)) delete dirty[pid];
+        setStatus(anyDirty() ? "saving" : "ok");
+      }, function () { setStatus("error"); });
+    });
+  }
+  function flushAll(keep) { Object.keys(dirty).forEach(function (pid) { clearTimeout(timers[pid]); timers[pid] = null; flush(pid, keep); }); }
+
+  function sanitize(r) {
+    var o = {};
+    STATS.forEach(function (s) { var v = Math.round(Number(r && r[s.id])); if (v >= 1 && v <= 10) o[s.id] = v; });
+    return o;
+  }
+
+  function load() {
+    $("#fail").hidden = true;
+    $("#boot").hidden = false;
+    return Promise.all([rpc("forja_personas"), rpc("forja_mis_votos", { p_voter: VOTER })]).then(function (res) {
+      personas = res[0] || [];
+      mine = {};
+      (res[1] || []).forEach(function (v) { mine[v.persona_id] = sanitize(v.ratings); });
+      if (!personas.some(function (p) { return p.id === selectedId; })) selectedId = personas.length ? personas[0].id : null;
+      $("#boot").hidden = true;
+      $("#app").hidden = false;
+      setStatus("ok");
+      $("#status").textContent = "Listo para votar";
+      render();
+    }, function () {
+      $("#boot").hidden = true;
+      $("#fail").hidden = false;
+      setStatus("error");
+    });
+  }
+
+  $("#groups").innerHTML = groupsHtml("");
+  $("#list").addEventListener("click", function (e) {
+    var c = e.target.closest(".card");
+    if (!c) return;
+    selectedId = c.dataset.id;
+    render();
+  });
+  $("#groups").addEventListener("click", function (e) {
+    var b = e.target.closest(".pip");
+    if (!b || !selectedId) return;
+    var id = b.dataset.stat, n = Number(b.dataset.n);
+    var m = mine[selectedId] || (mine[selectedId] = {});
+    var nv = (m[id] || 0) === n ? n - 1 : n;
+    if (nv <= 0) delete m[id]; else m[id] = nv;
+    render();
+    save(selectedId);
+  });
+  $("#retry").addEventListener("click", load);
+  window.addEventListener("online", function () { flushAll(false); });
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") flushAll(true); });
+  window.addEventListener("pagehide", function () { flushAll(true); });
+  setInterval(function () { if (anyDirty()) flushAll(false); }, 15000);
+  load();
+})();
+</script>
+</body>
+</html>

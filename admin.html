@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Forja de Personajes · Administración</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Pixelify+Sans:wght@500;700&display=swap">
+<link rel="stylesheet" href="common.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>Forja de Personajes</h1>
+      <p class="tagline">Administración: medias del grupo y gestión de personas. Solo con tu clave.</p>
+    </div>
+    <div class="toolbar" id="toolbar" hidden>
+      <span class="status" id="status" data-k="ok" role="status">Actualizado</span>
+      <button class="btn ghost" type="button" id="refresh">Actualizar</button>
+      <button class="btn ghost" type="button" id="logout">Cerrar sesión</button>
+    </div>
+  </header>
+
+  <section class="panel lock" id="lock">
+    <h2>Clave de administración</h2>
+    <p>Escribe tu clave para ver los resultados y gestionar a las personas.</p>
+    <form id="lockForm" autocomplete="off">
+      <input id="keyInp" type="password" aria-label="Clave de administración" placeholder="Clave" required>
+      <button class="btn" type="submit">Entrar</button>
+    </form>
+    <div class="err" id="lockErr" role="alert"></div>
+  </section>
+
+  <div class="app" id="app" hidden>
+    <aside class="panel roster" aria-label="Personas">
+      <h2>Personas</h2>
+      <form class="add" id="addForm" autocomplete="off">
+        <input id="addName" type="text" maxlength="40" placeholder="Nombre de la persona" aria-label="Nombre de la nueva persona">
+        <button class="btn" type="submit">Añadir</button>
+      </form>
+      <div class="sortrow">
+        <span class="label" id="count">0 personas</span>
+        <select id="sort" aria-label="Ordenar personas">
+          <option value="score">Mayor puntaje</option>
+          <option value="name">Nombre</option>
+          <option value="order">Orden de la lista</option>
+        </select>
+      </div>
+      <p class="legend" id="info"></p>
+      <div class="list" id="list"></div>
+      <p class="legend">Rango por puntaje total (máx. 150): S 135+ · A 115+ · B 95+ · C 75+ · D 55+ · E menos de 55.</p>
+    </aside>
+
+    <main class="sheet">
+      <div class="panel sheet-empty" id="sheetEmpty">Elige a una persona de la lista.</div>
+      <div class="sheet" id="sheet" hidden>
+        <section class="panel hero">
+          <div class="rankcap"><div class="badge big" id="rankBig">–</div><span>Rango</span></div>
+          <div class="hero-main">
+            <input class="name-input" id="nameInput" type="text" maxlength="40" aria-label="Nombre de la persona" placeholder="Sin nombre">
+            <div class="classline"><span>Clase</span><strong id="classTxt">Sin clase</strong><span id="votersTxt"></span></div>
+            <div class="power">
+              <div class="bar" aria-hidden="true"><i id="powerFill"></i></div>
+              <b id="powerTxt">0 / 150</b>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel mid">
+          <div class="radar-box"><svg id="radar" viewBox="0 0 520 440" role="img" aria-label="Gráfico radar de la media de los 15 atributos"></svg></div>
+          <div class="cats" id="cats"></div>
+        </section>
+
+        <div class="groups ro" id="groups"></div>
+
+        <div class="foot">
+          <p>Cada atributo muestra la media de quienes lo calificaron y cuántos votos tiene. Para cambiar el nombre, edítalo arriba y sal del campo.</p>
+          <button class="btn danger" type="button" id="delBtn">Eliminar persona</button>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script>
+(function () {
+  var KEY_STORE = "forja-admin-key";
+  var key = "";
+  try { key = sessionStorage.getItem(KEY_STORE) || ""; } catch (e) {}
+  var data = [], selectedId = null, sort = "score", sheetFor = null, timer = null;
+
+  function statsOf(p) {
+    var o = {};
+    STATS.forEach(function (s) { o[s.id] = Number((p.medias || {})[s.id]) || 0; });
+    return o;
+  }
+  function byId(id) { return data.filter(function (p) { return p.id === id; })[0]; }
+  function setStatus(k, txt) { var el = $("#status"); el.dataset.k = k; el.textContent = txt; }
+  function nowTxt() { var d = new Date(); return d.toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }); }
+
+  function show(unlocked) {
+    $("#lock").hidden = unlocked;
+    $("#app").hidden = !unlocked;
+    $("#toolbar").hidden = !unlocked;
+  }
+
+  function sorted() {
+    var arr = data.slice();
+    if (sort === "name") arr.sort(function (a, b) { return a.nombre.localeCompare(b.nombre, "es"); });
+    else if (sort === "score") arr.sort(function (a, b) { return total(statsOf(b)) - total(statsOf(a)) || a.nombre.localeCompare(b.nombre, "es"); });
+    return arr;
+  }
+
+  function renderList() {
+    var arr = sorted();
+    $("#count").textContent = arr.length + (arr.length === 1 ? " persona" : " personas");
+    var voters = 0;
+    data.forEach(function (p) { voters = Math.max(voters, Number(p.votantes) || 0); });
+    $("#info").textContent = "Máximo de votos recibidos por una persona: " + voters + ".";
+    $("#list").innerHTML = arr.map(function (p) {
+      var st = statsOf(p), t = total(st), nv = Number(p.votantes) || 0, none = nv === 0;
+      var r = none ? "–" : rankOf(t);
+      var mini = CATS.map(function (c) { return '<i><b style="width:' + (catAvg(st, c) * 10).toFixed(0) + '%"></b></i>'; }).join("");
+      var sub = none ? "Sin votos todavía" : classOf(st) + " · " + fmtNum(Math.round(t * 10) / 10) + " pts · " + nv + (nv === 1 ? " voto" : " votos");
+      return '<button type="button" class="card" data-id="' + esc(p.id) + '" aria-current="' + (p.id === selectedId) + '">' +
+        '<div class="badge' + (r === "S" ? " s" : none ? " dim" : "") + '">' + r + "</div>" +
+        '<div class="meta"><div class="nm">' + esc(p.nombre) + '</div><div class="sub">' + sub + "</div></div>" +
+        '<div class="mini" aria-hidden="true">' + mini + "</div></button>";
+    }).join("") || '<p class="empty">No hay personas. Escribe un nombre arriba y pulsa Añadir.</p>';
+  }
+
+  function renderSheet(force) {
+    var p = byId(selectedId);
+    $("#sheetEmpty").hidden = !!p;
+    $("#sheet").hidden = !p;
+    if (!p) { sheetFor = null; return; }
+    var st = statsOf(p), t = total(st), nv = Number(p.votantes) || 0, none = nv === 0;
+    if (force || sheetFor !== p.id) { $("#nameInput").value = p.nombre; resetDelete(); }
+    else if (document.activeElement !== $("#nameInput")) $("#nameInput").value = p.nombre;
+    sheetFor = p.id;
+    var r = none ? "–" : rankOf(t), big = $("#rankBig");
+    big.textContent = r;
+    big.className = "badge big" + (r === "S" ? " s" : none ? " dim" : "");
+    $("#classTxt").textContent = classOf(st);
+    $("#votersTxt").textContent = nv + (nv === 1 ? " persona ha votado" : " personas han votado");
+    $("#powerTxt").textContent = fmtNum(Math.round(t * 10) / 10) + " / " + MAXPTS;
+    $("#powerFill").style.width = (t / MAXPTS * 100).toFixed(1) + "%";
+    $("#radar").innerHTML = radarSvg(st);
+    CATS.forEach(function (c) {
+      var a = catAvg(st, c);
+      $("#avg-" + c.id).textContent = a.toFixed(1);
+      $("#avgbar-" + c.id).style.width = (a * 10).toFixed(0) + "%";
+    });
+    var g = $("#groups");
+    STATS.forEach(function (s) {
+      var v = st[s.id], c = Number((p.conteos || {})[s.id]) || 0;
+      $("#val-" + s.id).textContent = v === 0 ? "–" : fmtNum(Math.round(v * 10) / 10);
+      $("#hint-" + s.id).textContent = c + (c === 1 ? " voto" : " votos");
+      setPips(g, s.id, v);
+    });
+  }
+
+  function renderAll(force) {
+    if (!byId(selectedId)) { var f = sorted()[0]; selectedId = f ? f.id : null; }
+    renderList();
+    renderSheet(force);
+  }
+
+  function refresh(manual) {
+    if (manual) setStatus("saving", "Actualizando…");
+    return rpc("forja_resultados", { p_key: key }).then(function (res) {
+      data = res || [];
+      setStatus("ok", "Actualizado " + nowTxt());
+      renderAll(false);
+      return true;
+    }, function (e) {
+      if (/clave/i.test(e.message)) { logout(); $("#lockErr").textContent = "La clave ya no es válida."; return false; }
+      setStatus("error", "No se pudo actualizar");
+      return false;
+    });
+  }
+
+  function login(k) {
+    key = k;
+    return rpc("forja_resultados", { p_key: k }).then(function (res) {
+      data = res || [];
+      try { sessionStorage.setItem(KEY_STORE, k); } catch (e) {}
+      $("#lockErr").textContent = "";
+      show(true);
+      setStatus("ok", "Actualizado " + nowTxt());
+      selectedId = null;
+      renderAll(true);
+      clearInterval(timer);
+      timer = setInterval(function () { if (document.visibilityState === "visible") refresh(false); }, 30000);
+      return true;
+    }, function (e) {
+      key = "";
+      $("#lockErr").textContent = /clave/i.test(e.message) ? "Clave incorrecta." : "No se pudo conectar. Inténtalo de nuevo.";
+      return false;
+    });
+  }
+  function logout() {
+    key = "";
+    try { sessionStorage.removeItem(KEY_STORE); } catch (e) {}
+    clearInterval(timer);
+    data = [];
+    show(false);
+    $("#keyInp").value = "";
+  }
+
+  var delArmed = false, delTimer = null;
+  function resetDelete() {
+    delArmed = false;
+    clearTimeout(delTimer);
+    var b = $("#delBtn");
+    b.classList.remove("armed");
+    b.textContent = "Eliminar persona";
+  }
+
+  $("#lockForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var k = $("#keyInp").value;
+    if (k) login(k);
+  });
+  $("#refresh").addEventListener("click", function () { refresh(true); });
+  $("#logout").addEventListener("click", logout);
+  $("#sort").addEventListener("change", function (e) { sort = e.target.value; renderList(); });
+  $("#list").addEventListener("click", function (e) {
+    var c = e.target.closest(".card");
+    if (!c) return;
+    selectedId = c.dataset.id;
+    renderList();
+    renderSheet(true);
+  });
+  $("#addForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var inp = $("#addName"), name = inp.value.trim();
+    if (!name) { inp.focus(); return; }
+    setStatus("saving", "Guardando…");
+    rpc("forja_admin_agregar", { p_key: key, p_nombre: name }).then(function (id) {
+      inp.value = "";
+      selectedId = id;
+      return refresh(false).then(function () { renderSheet(true); });
+    }, function () { setStatus("error", "No se pudo añadir"); });
+  });
+  function rename() {
+    var p = byId(selectedId);
+    if (!p) return;
+    var v = $("#nameInput").value.trim();
+    if (!v) { $("#nameInput").value = p.nombre; return; }
+    if (v === p.nombre) return;
+    setStatus("saving", "Guardando…");
+    rpc("forja_admin_renombrar", { p_key: key, p_id: p.id, p_nombre: v }).then(function () { return refresh(false); },
+      function () { setStatus("error", "No se pudo renombrar"); });
+  }
+  $("#nameInput").addEventListener("change", rename);
+  $("#nameInput").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); e.target.blur(); } });
+  $("#delBtn").addEventListener("click", function () {
+    if (!delArmed) {
+      delArmed = true;
+      var b = $("#delBtn");
+      b.classList.add("armed");
+      b.textContent = "Confirmar eliminación";
+      delTimer = setTimeout(resetDelete, 3500);
+      return;
+    }
+    var id = selectedId;
+    resetDelete();
+    setStatus("saving", "Guardando…");
+    rpc("forja_admin_eliminar", { p_key: key, p_id: id }).then(function () {
+      selectedId = null;
+      return refresh(false).then(function () { renderSheet(true); });
+    }, function () { setStatus("error", "No se pudo eliminar"); });
+  });
+
+  $("#groups").innerHTML = groupsHtml("");
+  $("#cats").innerHTML = '<div class="label">Media por área</div>' + CATS.map(function (c) {
+    return '<div class="catsum ' + c.id + '"><div class="row"><span>' + c.name + '</span><b id="avg-' + c.id + '">0.0</b></div>' +
+      '<div class="bar"><i id="avgbar-' + c.id + '" style="background:var(--c-' + c.id + ')"></i></div></div>';
+  }).join("");
+
+  if (key) { login(key).then(function (ok) { if (!ok) show(false); }); } else { show(false); }
+})();
+</script>
+</body>
+</html>
